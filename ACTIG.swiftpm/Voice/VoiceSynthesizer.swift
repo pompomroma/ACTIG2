@@ -11,6 +11,10 @@ final class VoiceSynthesizer: NSObject, ObservableObject, AVSpeechSynthesizerDel
     private let synth = AVSpeechSynthesizer()
     private var queue: [String] = []
 
+    /// Called when speech begins (the first utterance after a silence). Used to
+    /// pause speech recognition so the assistant doesn't hear — and react to —
+    /// its own voice.
+    var onStarted: (() -> Void)?
     /// Called when the synthesizer finishes everything queued.
     var onFinished: (() -> Void)?
 
@@ -38,7 +42,9 @@ final class VoiceSynthesizer: NSObject, ObservableObject, AVSpeechSynthesizerDel
         utterance.pitchMultiplier = 0.92   // slightly lowered, mechanical
         utterance.preUtteranceDelay = 0.0
         utterance.postUtteranceDelay = 0.05
+        let wasSpeaking = isSpeaking
         isSpeaking = true
+        if !wasSpeaking { onStarted?() }   // silence → speaking transition
         synth.speak(utterance)
     }
 
@@ -74,6 +80,16 @@ final class VoiceSynthesizer: NSObject, ObservableObject, AVSpeechSynthesizerDel
                 isSpeaking = false
                 onFinished?()
             }
+        }
+    }
+
+    /// Stopping the synthesizer (mute, barge-in, shutdown) delivers `didCancel`
+    /// rather than `didFinish`. Treat it the same so listeners (e.g. reopening the
+    /// mic) always run and we never get stuck mid-speech.
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        Task { @MainActor in
+            isSpeaking = false
+            onFinished?()
         }
     }
 }

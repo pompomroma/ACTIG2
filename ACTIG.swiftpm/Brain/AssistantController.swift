@@ -26,6 +26,10 @@ final class AssistantController: ObservableObject {
     /// The in-flight LLM generation, cancellable for barge-in interruption.
     private var generation: Task<Void, Never>?
 
+    /// True when we closed the mic because the assistant started speaking, so we
+    /// know to reopen it once it finishes.
+    private var listeningPausedForSpeech = false
+
     init(state: AppState) {
         self.state = state
     }
@@ -90,9 +94,28 @@ final class AssistantController: ObservableObject {
         wakeWord.onWake = { [weak self] in Task { await self?.wake() } }
         wakeWord.onSleep = { [weak self] in self?.shutdown() }
 
+        // While A.C.T.I.G. is speaking, close the mic so its own synthesized voice
+        // isn't picked up by the recognizer. Without this the TTS output is heard
+        // as "the user started talking", which trips barge-in and cancels (and
+        // discards) the reply being spoken — making the assistant look like it
+        // never answers, for both typed and spoken input.
+        voice.onStarted = { [weak self] in
+            guard let self else { return }
+            if self.speech.isListening {
+                self.listeningPausedForSpeech = true
+                self.speech.pauseForPlayback()
+            }
+        }
         voice.onFinished = { [weak self] in
             guard let self else { return }
             if self.state.mode == .responding { self.state.mode = .awake; self.state.statusLine = "listening" }
+            // Reopen the mic now that we've stopped talking (unless the user muted
+            // it in the meantime).
+            if self.listeningPausedForSpeech {
+                self.listeningPausedForSpeech = false
+                if self.state.userMicMuted { self.speech.clearPlaybackPause() }
+                else { self.speech.resumeAfterPlayback() }
+            }
         }
     }
 
