@@ -38,15 +38,17 @@ final class AssistantController: ObservableObject {
         wireVoice()
         wireBargeIn()
 
+        // Come online FIRST — before model loading or the microphone / speech
+        // permission prompt, both of which suspend this function (the permission
+        // request parks here until the user taps the dialog, and may be denied).
+        // Waking first guarantees the conversation panel and its text input are
+        // visible and usable right away; otherwise bootstrap stays parked on a
+        // permission request and the app sits dormant, with no text field and
+        // spoken input ignored, looking completely unresponsive.
+        await wake()
+
         await loadModel()
         await startListeningForWake()
-
-        // Come online automatically so the conversation panel — and its text
-        // input — are visible immediately and spoken commands are acted on. Left
-        // dormant, the app hides the chat box (the only text field lives inside
-        // the active panel) and ignores everything but the wake word, which makes
-        // it look like the assistant never answers typed or spoken input.
-        await wake()
     }
 
     private func loadModel() async {
