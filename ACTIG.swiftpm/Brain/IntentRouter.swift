@@ -1,4 +1,5 @@
 import Foundation
+import simd
 
 /// A command A.C.T.I.G. can act on locally, before (or instead of) consulting
 /// the language model. Keeping these as fast keyword intents gives the snappy,
@@ -16,26 +17,33 @@ enum AssistantIntent: Equatable {
     case undo
     case redo
     case scene(SceneIntent)
-    case chat(String)            // fall through to the LLM
+    case modelScene(request: String)   // multi-part build, driven by the model
+    case chat(String)                  // fall through to the LLM
 }
 
 /// 3D-space sub-commands parsed from natural language.
 struct SceneIntent: Equatable {
     enum Action: Equatable {
         case add(ShapeKind)
+        case addColored(ShapeKind, hue: Float, sat: Float)
         case multiply(ShapeKind, count: Int)
         case grow
         case shrink
         case delete
         case swap
         case clear
+        case rotate(degrees: Float, axis: SIMD3<Float>)
+        case moveDirection(SIMD3<Float>)
+        case recolorSelection(hue: Float, sat: Float)
+        case selectKind(ShapeKind)
     }
     let action: Action
 }
 
 /// Parses raw user text (typed or transcribed) into an intent. This is
-/// deliberately simple and deterministic; anything unrecognised becomes
-/// `.chat` and is answered by the model.
+/// deliberately simple and deterministic; recognised 3D edits act instantly,
+/// open-ended "build me a …" requests go to the model, and anything else
+/// becomes `.chat`.
 enum IntentRouter {
     static func parse(_ raw: String) -> AssistantIntent {
         let t = raw.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
@@ -68,35 +76,96 @@ enum IntentRouter {
         if t.matchesAny("undo", "go back", "previous action", "revert") { return .undo }
         if t.matchesAny("redo", "do it again") { return .redo }
 
-        // Scene editing
+        // Deterministic scene edits (add primitive, colour, rotate, move, select…)
         if let scene = parseScene(t) { return .scene(scene) }
+
+        // Open-ended 3D build → let the model construct it (template fallback).
+        if isBuildRequest(t) { return .modelScene(request: raw) }
 
         return .chat(raw)
     }
 
+    // MARK: - Build detection
+
+    private static func isBuildRequest(_ t: String) -> Bool {
+        if SceneTemplate.build(for: t) != nil { return true }
+        return t.matchesAny("build", "construct", "assemble", "sculpt", "rebuild",
+                            "model a", "model me", "make a", "make me", "create a",
+                            "create me", "design a", "design me")
+    }
+
+    // MARK: - Deterministic scene parsing
+
     private static func parseScene(_ t: String) -> SceneIntent? {
-        guard let kind = ShapeKind.detect(in: t) ?? implicitKind(t) else {
-            // Non-kind scene verbs that act on the selection.
-            if t.matchesAny("bigger", "grow", "extend", "enlarge", "scale up") { return SceneIntent(action: .grow) }
+        let color = ColorPalette.named(t)
+        let kind = ShapeKind.detect(in: t)
+
+        // Recolour the current selection: "make it red", "paint it blue", "turn it green".
+        if let col = color,
+           t.matchesAny("make it", "colour it", "color it", "paint it", "recolour", "recolor", "turn it") {
+            return SceneIntent(action: .recolorSelection(hue: col.hue, sat: col.sat))
+        }
+
+        // Rotate the selection.
+        if t.matchesAny("rotate", "spin") || (t.contains("turn") && color == nil && kind == nil) {
+            return SceneIntent(action: .rotate(degrees: extractNumber(t) ?? 45, axis: rotationAxis(t)))
+        }
+
+        // Nudge the selection in a direction.
+        if t.matchesAny("move", "nudge", "shift", "slide"), let delta = moveDelta(t) {
+            return SceneIntent(action: .moveDirection(delta))
+        }
+
+        // Select a shape by kind.
+        if t.matchesAny("select", "pick", "choose", "highlight"), let k = kind {
+            return SceneIntent(action: .selectKind(k))
+        }
+
+        // Verbs acting on the selection (no specific shape kind).
+        if kind == nil {
+            if t.matchesAny("clear the scene", "clear scene", "remove everything", "delete everything", "start over", "wipe") {
+                return SceneIntent(action: .clear)
+            }
+            if t.matchesAny("bigger", "grow", "enlarge", "scale up", "larger") { return SceneIntent(action: .grow) }
             if t.matchesAny("smaller", "shrink", "scale down") { return SceneIntent(action: .shrink) }
-            if t.matchesAny("delete", "remove") { return SceneIntent(action: .delete) }
+            if t.matchesAny("delete", "remove it") { return SceneIntent(action: .delete) }
             if t.matchesAny("swap", "switch places", "swap positions") { return SceneIntent(action: .swap) }
-            if t.matchesAny("clear the scene", "clear scene", "remove everything", "start over") { return SceneIntent(action: .clear) }
             return nil
         }
 
+        // Shape creation (optionally multiplied / coloured). Any mention of a
+        // known kind in the 3D context resolves to adding it.
         if let n = extractCount(t), t.matchesAny("multiply", "copies", "duplicate", "times") {
-            return SceneIntent(action: .multiply(kind, count: n))
+            return SceneIntent(action: .multiply(kind!, count: n))
         }
-        if t.matchesAny("add", "create", "make", "spawn", "call", "give me", "place") {
-            return SceneIntent(action: .add(kind))
+        if let col = color {
+            return SceneIntent(action: .addColored(kind!, hue: col.hue, sat: col.sat))
         }
-        // Bare "a cube" etc. still adds it.
-        return SceneIntent(action: .add(kind))
+        return SceneIntent(action: .add(kind!))
     }
 
-    private static func implicitKind(_ t: String) -> ShapeKind? {
-        ShapeKind.detect(in: t)
+    // MARK: - Helpers
+
+    private static func rotationAxis(_ t: String) -> SIMD3<Float> {
+        if t.matchesAny("forward", "pitch", "tip", "tilt") { return SIMD3<Float>(1, 0, 0) }
+        if t.matchesAny("roll", "sideways") { return SIMD3<Float>(0, 0, 1) }
+        return SIMD3<Float>(0, 1, 0)   // yaw by default
+    }
+
+    private static func moveDelta(_ t: String) -> SIMD3<Float>? {
+        let d: Float = 0.09
+        if t.contains("left") { return SIMD3<Float>(-d, 0, 0) }
+        if t.contains("right") { return SIMD3<Float>(d, 0, 0) }
+        if t.matchesAny("up", "higher", "raise") { return SIMD3<Float>(0, d, 0) }
+        if t.matchesAny("down", "lower", "drop it") { return SIMD3<Float>(0, -d, 0) }
+        if t.matchesAny("forward", "closer", "nearer", "toward") { return SIMD3<Float>(0, 0, d) }
+        if t.matchesAny("back", "backward", "away", "farther", "further") { return SIMD3<Float>(0, 0, -d) }
+        return nil
+    }
+
+    /// First standalone number in the text (e.g. "spin 90 degrees" → 90).
+    private static func extractNumber(_ t: String) -> Float? {
+        t.split(whereSeparator: { !$0.isNumber && $0 != "." }).compactMap { Float($0) }.first
     }
 
     private static func extractCount(_ t: String) -> Int? {

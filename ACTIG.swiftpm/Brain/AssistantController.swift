@@ -250,6 +250,9 @@ final class AssistantController: ObservableObject {
         case .scene(let s):
             applyScene(s)
 
+        case .modelScene(let request):
+            await modelScene(request: request)
+
         case .chat(let prompt):
             await generateReply(for: prompt)
         }
@@ -261,13 +264,95 @@ final class AssistantController: ObservableObject {
         if state.workspace != .scene3D { withAnimation(.spring) { state.workspace = .scene3D } }
         switch s.action {
         case .add(let kind): sceneStore.addShape(kind); speak("Added a \(kind.rawValue).")
+        case .addColored(let kind, let hue, let sat):
+            sceneStore.addShape(kind, hue: hue, saturation: sat)
+            speak("Added a \(colorName(hue, sat)) \(kind.rawValue).")
         case .multiply(let kind, let n): sceneStore.multiply(kind, count: n); speak("Created \(n) \(kind.rawValue)s.")
         case .grow: sceneStore.grow(sceneStore.selection); speak("Enlarged.")
         case .shrink: sceneStore.shrink(sceneStore.selection); speak("Shrunk.")
+        case .rotate(let degrees, let axis):
+            sceneStore.rotate(sceneStore.selection, byDegrees: degrees, axis: axis)
+            speak("Rotated.")
+        case .moveDirection(let delta):
+            sceneStore.move(sceneStore.selection, by: delta)
+            speak("Moved it.")
+        case .recolorSelection(let hue, let sat):
+            sceneStore.recolor(sceneStore.selection, hue: hue, saturation: sat)
+            speak("Now \(colorName(hue, sat)).")
+        case .selectKind(let kind):
+            sceneStore.select(kind: kind)
+            speak("Selected the \(kind.rawValue).")
         case .delete: sceneStore.deleteSelected(); speak("Deleted.")
         case .swap: sceneStore.swapFirstTwo(); speak("Swapped positions.")
         case .clear: sceneStore.clear(); speak("Scene cleared.")
         }
+    }
+
+    // MARK: - LLM-driven modelling (multi-part builds)
+
+    /// Builds a recognisable object from a natural-language request. The on-device
+    /// model proposes a JSON scene plan; if it (or the offline stub) can't, a
+    /// built-in template is used so something is always built.
+    private func modelScene(request: String) async {
+        if state.workspace != .scene3D { withAnimation(.spring) { state.workspace = .scene3D } }
+        state.mode = .responding
+        state.statusLine = "modelling…"
+
+        // 1. Ask the model for a structured plan, accumulating the full response.
+        var text = ""
+        let history = [ChatMessage(role: .user, text: request)]
+        do {
+            let stream = engine.reply(to: history, system: Conversation.modelingSystemPrompt)
+            for try await token in stream {
+                if Task.isCancelled { break }
+                text += token.text
+                if text.count > 8000 { break }   // a plan is never this long
+            }
+        } catch {
+            text = ""
+        }
+
+        // 2. Parse the plan; fall back to a built-in template; else offer help.
+        if let nodes = ScenePlanParser.parse(text) {
+            sceneStore.build(nodes)
+            finishModelling(label: cleanName(request), count: nodes.count)
+        } else if let template = SceneTemplate.build(for: request) {
+            sceneStore.build(template.nodes)
+            finishModelling(label: template.name, count: template.nodes.count)
+        } else {
+            state.mode = .awake
+            state.statusLine = "listening"
+            speak("I couldn't model that one yet. Try “build a house”, a snowman, car, tower, tree, robot, rocket, table or chair — or ask for basic shapes.")
+        }
+    }
+
+    private func finishModelling(label: String, count: Int) {
+        state.mode = .awake
+        state.statusLine = "ready"
+        speak("Modelled \(label) — \(count) part\(count == 1 ? "" : "s").")
+    }
+
+    /// Strip leading build verbs so a confirmation reads naturally.
+    private func cleanName(_ s: String) -> String {
+        var x = s.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefixes = ["build me a ", "build me an ", "build me ", "build a ", "build an ", "build ",
+                        "make me a ", "make me an ", "make a ", "make an ", "make ",
+                        "create me a ", "create a ", "create an ", "create ",
+                        "model a ", "model an ", "model me ", "model ",
+                        "construct a ", "construct an ", "construct ",
+                        "design a ", "design an ", "design ", "assemble a ", "assemble "]
+        for p in prefixes where x.hasPrefix(p) { x = String(x.dropFirst(p.count)); break }
+        if x.hasPrefix("a ") { x = String(x.dropFirst(2)) }
+        else if x.hasPrefix("an ") { x = String(x.dropFirst(3)) }
+        return x.isEmpty ? "it" : x
+    }
+
+    /// Nearest palette name for a hue/saturation, for spoken confirmations.
+    private func colorName(_ hue: Float, _ sat: Float) -> String {
+        if sat < 0.08 { return "white" }
+        return ColorPalette.map
+            .filter { $0.value.sat >= 0.08 }
+            .min(by: { abs($0.value.hue - hue) < abs($1.value.hue - hue) })?.key ?? "blue"
     }
 
     // MARK: - LLM reply (interruptible)

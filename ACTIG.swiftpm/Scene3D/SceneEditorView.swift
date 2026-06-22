@@ -67,6 +67,8 @@ struct SceneEditorView: View {
 
             toolButton("plus.magnifyingglass", "Grow") { store.grow(store.selection) }
             toolButton("minus.magnifyingglass", "Shrink") { store.shrink(store.selection) }
+            toolButton("rotate.3d", "Rotate") { store.rotate(byDegrees: 30) }
+            toolButton("paintpalette", "Color") { cycleColor() }
             toolButton("trash", "Delete") { store.deleteSelected() }
 
             Divider().frame(height: 30).overlay(HoloTheme.primary.opacity(0.4))
@@ -88,6 +90,20 @@ struct SceneEditorView: View {
         }
         .disabled(!enabled)
         .buttonStyle(.plain)
+    }
+
+    /// Step the selected shape's colour through the palette (touch parity with
+    /// the spoken "make it red/blue/…" commands).
+    private func cycleColor() {
+        let palette: [(Float, Float)] = [
+            (0.0, 0.85), (0.07, 0.9), (0.15, 0.9), (0.33, 0.8),
+            (0.52, 0.85), (0.6, 0.85), (0.8, 0.8), (0.0, 0.0)
+        ]
+        guard let id = store.selection,
+              let node = store.shapes.first(where: { $0.id == id }) else { return }
+        let idx = palette.firstIndex { abs($0.0 - node.hue) < 0.02 && abs($0.1 - node.saturation) < 0.05 } ?? -1
+        let next = palette[(idx + 1) % palette.count]
+        store.recolor(id, hue: next.0, saturation: next.1)
     }
 }
 
@@ -165,7 +181,9 @@ struct RealitySceneView: UIViewRepresentable {
             for node in shapes {
                 if let ent = entities[node.id] {
                     ent.position = node.position
-                    ent.scale = SIMD3<Float>(repeating: node.scale)
+                    ent.scale = node.scale
+                    ent.orientation = ShapeFactory.orientation(node.rotation)
+                    ent.model?.materials = [ShapeFactory.material(hue: node.hue, saturation: node.saturation)]
                 } else {
                     add(node)
                 }

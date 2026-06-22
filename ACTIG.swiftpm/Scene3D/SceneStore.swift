@@ -6,7 +6,8 @@ import simd
 /// drives undo/redo via a command stack, and autosaves after every change.
 ///
 /// All mutation goes through `apply(_:)` so every edit — whether from touch,
-/// voice, or camera hand-tracking — is recorded and reversible.
+/// voice, the language model, or camera hand-tracking — is recorded and
+/// reversible.
 @MainActor
 final class SceneStore: ObservableObject {
     @Published private(set) var shapes: [ShapeNode] = []
@@ -57,6 +58,10 @@ final class SceneStore: ObservableObject {
             if let i = index(id) { shapes[i].position = to }
         case .scale(let id, _, let to):
             if let i = index(id) { shapes[i].scale = to }
+        case .rotate(let id, _, let to):
+            if let i = index(id) { shapes[i].rotation = to }
+        case .recolor(let id, _, _, let toHue, let toSat):
+            if let i = index(id) { shapes[i].hue = toHue; shapes[i].saturation = toSat }
         case .swap(let a, let b, _, let posB):
             // posB is the target for `a`; `b` gets the original `a` position,
             // both already encoded in the command's stored positions.
@@ -65,16 +70,24 @@ final class SceneStore: ObservableObject {
                 shapes[ia].position = posB
                 shapes[ib].position = tmp
             }
+        case .group(let cmds):
+            cmds.forEach { perform($0) }
         }
     }
 
     private func index(_ id: UUID) -> Int? { shapes.firstIndex { $0.id == id } }
 
-    // MARK: - High-level operations (used by voice + touch + camera)
+    // MARK: - High-level operations (used by voice + LLM + touch + camera)
 
     func addShape(_ kind: ShapeKind, near: SIMD3<Float>? = nil) {
         let pos = near ?? randomSpawn()
         apply(.add(ShapeNode(kind: kind, position: pos, hue: Float.random(in: 0.45...0.62))))
+    }
+
+    /// Add a shape in a specific colour, as one undoable step.
+    func addShape(_ kind: ShapeKind, hue: Float, saturation: Float, near: SIMD3<Float>? = nil) {
+        let pos = near ?? randomSpawn()
+        apply(.add(ShapeNode(kind: kind, position: pos, hue: hue.clamped01, saturation: saturation.clamped01)))
     }
 
     func multiply(_ kind: ShapeKind, count: Int) {
@@ -87,8 +100,38 @@ final class SceneStore: ObservableObject {
     private func scaleSelected(_ id: UUID?, factor: Float) {
         guard let id = id ?? selection, let i = index(id) else { return }
         let from = shapes[i].scale
-        let to = max(0.02, min(from * factor, 1.2))
+        let to = simd_clamp(from * factor,
+                            SIMD3<Float>(repeating: 0.02),
+                            SIMD3<Float>(repeating: 1.4))
         apply(.scale(id: id, from: from, to: to))
+    }
+
+    /// Recolour the selection (or a given node). Hue/saturation are 0...1.
+    func recolor(_ id: UUID? = nil, hue: Float, saturation: Float) {
+        guard let id = id ?? selection, let i = index(id) else { return }
+        apply(.recolor(id: id,
+                       fromHue: shapes[i].hue, fromSat: shapes[i].saturation,
+                       toHue: hue.clamped01, toSat: saturation.clamped01))
+    }
+
+    /// Rotate the selection (or a node) by `degrees` around `axis` (default yaw).
+    func rotate(_ id: UUID? = nil, byDegrees degrees: Float, axis: SIMD3<Float> = SIMD3<Float>(0, 1, 0)) {
+        guard let id = id ?? selection, let i = index(id) else { return }
+        let from = shapes[i].rotation
+        let to = from + simd_normalize(axis) * (degrees * .pi / 180)
+        apply(.rotate(id: id, from: from, to: to))
+    }
+
+    /// Nudge the selection (or a node) by a world-space delta.
+    func move(_ id: UUID? = nil, by delta: SIMD3<Float>) {
+        guard let id = id ?? selection, let i = index(id) else { return }
+        let from = shapes[i].position
+        apply(.move(id: id, from: from, to: from + delta))
+    }
+
+    /// Select the most recently added shape of a kind ("select the sphere").
+    func select(kind: ShapeKind) {
+        if let node = shapes.last(where: { $0.kind == kind }) { selection = node.id }
     }
 
     func deleteSelected(_ id: UUID? = nil) {
@@ -115,7 +158,19 @@ final class SceneStore: ObservableObject {
     }
 
     func clear() {
-        for node in shapes.reversed() { apply(.remove(node)) }
+        guard !shapes.isEmpty else { return }
+        // One grouped command so a whole clear undoes in a single step.
+        apply(.group(shapes.reversed().map { .remove($0) }))
+    }
+
+    // MARK: - Modelling (multi-part builds)
+
+    /// Builds a whole model in one undoable step. The nodes' absolute positions
+    /// come from the LLM scene plan or a built-in template.
+    func build(_ nodes: [ShapeNode]) {
+        guard !nodes.isEmpty else { return }
+        apply(.group(nodes.map { .add($0) }))
+        selection = nodes.last?.id
     }
 
     private func randomSpawn() -> SIMD3<Float> {
@@ -143,4 +198,8 @@ final class SceneStore: ObservableObject {
               let saved = try? JSONDecoder().decode([ShapeNode].self, from: data) else { return }
         shapes = saved
     }
+}
+
+extension Float {
+    var clamped01: Float { Swift.max(0, Swift.min(1, self)) }
 }

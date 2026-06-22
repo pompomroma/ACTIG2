@@ -17,20 +17,32 @@ enum ShapeFactory {
         }
     }
 
-    /// Translucent, glowing blue "hologram" material. `UnlitMaterial` reads as
+    /// Translucent, glowing "hologram" material. `UnlitMaterial` reads as
     /// projected light (no shading) and supports per-channel alpha for the
     /// see-through hologram look — and compiles across RealityKit versions.
-    static func material(hue: Float) -> RealityKit.Material {
-        let color = UIColor(hue: CGFloat(hue), saturation: 0.7, brightness: 1.0, alpha: 0.6)
+    /// `saturation` lets shapes be any colour (0 = white) while keeping the glow.
+    static func material(hue: Float, saturation: Float = 0.7) -> RealityKit.Material {
+        let color = UIColor(hue: CGFloat(hue), saturation: CGFloat(saturation), brightness: 1.0, alpha: 0.6)
         return UnlitMaterial(color: color)
     }
 
-    /// Creates a positioned, scaled entity for a node, tagging it with the node id.
+    /// Euler (radians) → quaternion orientation, applied yaw·pitch·roll.
+    static func orientation(_ euler: SIMD3<Float>) -> simd_quatf {
+        let qx = simd_quatf(angle: euler.x, axis: SIMD3<Float>(1, 0, 0))
+        let qy = simd_quatf(angle: euler.y, axis: SIMD3<Float>(0, 1, 0))
+        let qz = simd_quatf(angle: euler.z, axis: SIMD3<Float>(0, 0, 1))
+        return qy * qx * qz
+    }
+
+    /// Creates a positioned, scaled, rotated entity for a node, tagging it with
+    /// the node id.
     static func entity(for node: ShapeNode) -> ModelEntity {
-        let entity = ModelEntity(mesh: mesh(for: node.kind), materials: [material(hue: node.hue)])
+        let entity = ModelEntity(mesh: mesh(for: node.kind),
+                                 materials: [material(hue: node.hue, saturation: node.saturation)])
         entity.name = node.id.uuidString
         entity.position = node.position
-        entity.scale = SIMD3<Float>(repeating: node.scale)
+        entity.scale = node.scale
+        entity.orientation = orientation(node.rotation)
         entity.generateCollisionShapes(recursive: false)
         return entity
     }

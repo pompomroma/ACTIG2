@@ -12,6 +12,28 @@ struct Conversation {
     fully offline and never claim access to other apps' private data or accounts.
     """
 
+    /// Handed to the model when the user asks A.C.T.I.G. to *build* something in
+    /// the 3D space. It must answer with ONLY a JSON scene plan we can execute.
+    static let modelingSystemPrompt = """
+    You are A.C.T.I.G.'s 3D modelling engine. Given a request, design the object \
+    out of simple primitives and reply with ONLY a JSON object — no prose, no \
+    code fences.
+
+    Schema:
+    {"commands":[{"shape":"box|sphere|cylinder|cone|pyramid|plane","x":<m>,"y":<m>,\
+    "z":<m>,"scale":<m>,"sx":<m>,"sy":<m>,"sz":<m>,"color":"red|orange|yellow|green|\
+    cyan|blue|purple|pink|white|brown|grey","rx":<deg>,"ry":<deg>,"rz":<deg>}]}
+
+    Rules:
+    - The scene is centred on the origin. Keep every x, y, z within -0.5...0.5 \
+    metres. y is up, z is toward the viewer.
+    - Sizes are in metres; use 0.02...0.4. "scale" sets a uniform size; "sx/sy/sz" \
+    override per axis (use them for slabs, thin legs, tall parts).
+    - x/y/z, color and rotation are optional (defaults: 0, blue, 0). "shape" is required.
+    - Use 3 to 30 parts. Stack and place them so the result is recognisable.
+    - Output the JSON object only.
+    """
+
     private static var fileURL: URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
