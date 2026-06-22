@@ -40,6 +40,13 @@ final class AssistantController: ObservableObject {
 
         await loadModel()
         await startListeningForWake()
+
+        // Come online automatically so the conversation panel — and its text
+        // input — are visible immediately and spoken commands are acted on. Left
+        // dormant, the app hides the chat box (the only text field lives inside
+        // the active panel) and ignores everything but the wake word, which makes
+        // it look like the assistant never answers typed or spoken input.
+        await wake()
     }
 
     private func loadModel() async {
@@ -253,9 +260,11 @@ final class AssistantController: ObservableObject {
             guard let self else { return }
             do {
                 var spokeAnything = false
+                var producedText = false
                 let stream = self.engine.reply(to: history, system: Conversation.systemPrompt)
                 for try await token in stream {
                     if Task.isCancelled { break }
+                    if !token.text.isEmpty { producedText = true }
                     self.state.appendToken(token.text, to: streamId)
                     if !self.state.aiVoiceMuted {
                         self.voice.enqueueToken(token.text)
@@ -266,6 +275,16 @@ final class AssistantController: ObservableObject {
                 if Task.isCancelled {
                     self.state.discardStream(streamId)   // abandon interrupted reply
                 } else {
+                    // Never leave the user staring at an empty bubble: if the model
+                    // streamed nothing, say so instead of looking unresponsive.
+                    if !producedText {
+                        let note = "I didn't get a response from the language model. If this keeps happening, install the on-device model (see README) — the offline stub will still answer in the meantime."
+                        self.state.appendToken(note, to: streamId)
+                        if !self.state.aiVoiceMuted {
+                            self.voice.enqueueToken(note)
+                            spokeAnything = true
+                        }
+                    }
                     self.state.finishStream(streamId)
                     if !self.state.aiVoiceMuted { self.voice.flushBuffer() }
                     if !spokeAnything { self.state.mode = .awake; self.state.statusLine = "listening" }
